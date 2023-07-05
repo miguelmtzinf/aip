@@ -1,29 +1,39 @@
 name: Upload IPFS
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 on:
-  pull_request:
+  push:
     branches:
-      - master
+      - main
 
 jobs:
-  upload-to-ipfs: 
+  upload-to-ipfs:
     name: aip-uploader
+    if: |
+      !contains(github.event.head_commit.message, 'chore(ipfs-hash)')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v2
-
-      - name: Rename aip to upper case
-        run: cd content/aips && bash toUpper.sh || true && cd ../..
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v1
+        uses: actions/checkout@v3
         with:
-          node-version: 12.x
+          fetch-depth: 0
+
+      - name: setup config
+        run: |
+          git config --global user.email "gitbot@aave.com"
+          git config --global user.name "Ipfs hash bot :robot:"
+
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: "npm"
 
       - name: Install dependencies
-        run: npm install
-      
+        run: npm ci
+
       - name: Parse Markdown
         run: npm run parse-markdown
 
@@ -33,10 +43,35 @@ jobs:
           PINATA_SECRET: ${{ secrets.PINATA_SECRET }}
         run: npm run upload:pinata-thegraph
 
-      - name: Commit changes
-        uses: EndBug/add-and-commit@v6
+      - name: Update readme
+        run: npm run ci:generate-readme
+
+      # emits a failure in case there are changes
+      # based on this condition we create a pr back to main
+      - name: Check changes
+        id: checkChanges
+        continue-on-error: true
+        run: |
+          if [[ -z $(git status -s) ]]
+          then
+            exit 1
+          else
+            git checkout -b ipfs-hash/${{ github.sha }}
+            git add .
+            git commit -am "chore(ipfs-hash): add missing ipfs hashes :robot:"
+            git push origin ipfs-hash/${{ github.sha }}
+            exit 0
+          fi
+
+      - uses: actions/github-script@v6
+        if: steps.checkChanges.outcome == 'success'
         with:
-          author_name: miguelmtzinf
-          author_email: miguelmtzinf@users.noreply.github.com
-          message: '[PIPELINE] Committed IPFS documents uploads'
-          add: '.'
+          script: |
+            github.rest.pulls.create({
+              title: 'chore(ipfs-hash): new ipfs hashes :rocket: :tada:',
+              body: 'This pr contains all newly created ipfs hashes',
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: 'ipfs-hash/${{ github.sha }}',
+              base: '${{ github.event.repository.default_branch }}'
+            })
